@@ -1,13 +1,8 @@
 from django import forms
-from django.contrib import messages
-from django.contrib.admin import register, site, ModelAdmin
+from django.contrib.admin import register, ModelAdmin
 from django.urls import path, reverse
-from django.http import HttpResponse
-from django.shortcuts import redirect
-from django.template.response import TemplateResponse
 from django.utils.html import format_html
 from django_mptt_admin.admin import DjangoMpttAdmin
-from django_q.tasks import async_task
 from leaflet.admin import LeafletGeoAdmin
 import logging
 from reversion.admin import VersionAdmin
@@ -15,9 +10,7 @@ from threading import Thread
 import time
 
 from .models import DepartmentUser, Location, OrgUnit, CostCentre
-from .tasks import alesco_data_import
-from .utils import departmentuser_csv_report
-from .views import DepartmentUserExport
+from .views import DepartmentUserExport, DepartmentUserDiscrepancyReport
 
 LOGGER = logging.getLogger('sync_tasks')
 
@@ -62,7 +55,7 @@ class DepartmentUserAdmin(VersionAdmin):
     readonly_fields = [
         'username', 'org_data_pretty', 'ad_data_pretty',
         'active', 'in_sync', 'ad_deleted', 'date_ad_updated',
-        'alesco_data_pretty', 'o365_licence', 'shared_account']
+        'alesco_data_pretty', 'o365_licence', 'shared_account', 'date_hr_term']
     fieldsets = (
         ('Email/username', {
             'fields': ('email', 'username'),
@@ -76,7 +69,7 @@ class DepartmentUserAdmin(VersionAdmin):
                 'org_unit', 'location', 'parent', 'security_clearance', 'name_update_reference'),
         }),
         ('Account fields', {
-            'fields': ('account_type', 'expiry_date', 'contractor', 'notes'),
+            'fields': ('account_type', 'expiry_date', 'date_hr_term', 'hr_auto_expiry', 'contractor', 'notes'),
         }),
         ('Other details', {
             'fields': (
@@ -157,46 +150,10 @@ class DepartmentUserAdmin(VersionAdmin):
     def get_urls(self):
         urls = super(DepartmentUserAdmin, self).get_urls()
         urls = [
-            path('alesco-import/', self.admin_site.admin_view(self.alesco_import), name='alesco_import'),
             path('export/', DepartmentUserExport.as_view(), name='departmentuser_export'),
-            #path('export/', self.admin_site.admin_view(self.export), name='departmentuser_export'),
+            path('departmentuser-discrepancy-report/', DepartmentUserDiscrepancyReport.as_view(), name='departmentuser_discrepancy_report'),
         ] + urls
         return urls
-
-    class AlescoImportForm(forms.Form):
-        spreadsheet = forms.FileField()
-
-    def alesco_import(self, request):
-        """Displays a form prompting user to upload an Excel spreadsheet of
-        employee data from Alesco. Temporary measure until database link is
-        worked out.
-        """
-        context = dict(
-            site.each_context(request),
-            title='Alesco data import'
-        )
-
-        if request.method == 'POST':
-            form = self.AlescoImportForm(request.POST, request.FILES)
-            if form.is_valid():
-                upload = request.FILES['spreadsheet']
-                # Run the task asynchronously.
-                async_task(alesco_data_import, upload)
-                messages.info(request, 'Alesco data spreadsheet uploaded successfully; data is now being processed.')
-                return redirect('admin:organisation_departmentuser_changelist')
-        else:
-            form = self.AlescoImportForm()
-        context['form'] = form
-
-        return TemplateResponse(request, 'organisation/alesco_import.html', context)
-
-    def export(self, request):
-        """Exports DepartmentUser data to a CSV, and returns
-        """
-        data = departmentuser_csv_report()
-        response = HttpResponse(data, content_type='text/csv')
-        response['Content-Disposition'] = 'attachment; filename=departmentuser_export.csv'
-        return response
 
 
 @register(Location)
@@ -263,4 +220,3 @@ class CostCentreAdmin(ModelAdmin):
             '<a href="{}?cost_centre={}">{}</a>',
             reverse('admin:organisation_departmentuser_changelist'),
             obj.pk, obj.departmentuser_set.count())
-

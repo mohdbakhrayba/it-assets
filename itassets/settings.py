@@ -48,7 +48,6 @@ INSTALLED_APPS = (
     'assets',
     'webconfig',
     'knowledge',
-    'frontend',
     'recoup',
     'status',
 )
@@ -157,8 +156,7 @@ if not os.path.exists(os.path.join(BASE_DIR, 'logs')):
 LOGGING = {
     'version': 1,
     'formatters': {
-        'console': {'format': '%(asctime)s %(levelname)s %(message)s'},
-        'simple': {'format': '%(levelname)s %(asctime)s %(message)s'},
+        'console': {'format': '%(asctime)s %(name)-12s %(message)s'},
         'verbose': {'format': '%(levelname)s %(asctime)s %(module)s %(message)s'},
     },
     'handlers': {
@@ -166,14 +164,6 @@ LOGGING = {
             'level': 'INFO',
             'class': 'logging.StreamHandler',
             'formatter': 'console'
-        },
-        'file': {
-            'level': 'INFO',
-            'class': 'logging.handlers.RotatingFileHandler',
-            'filename': os.path.join(BASE_DIR, 'logs', 'itassets.log'),
-            'formatter': 'simple',
-            'maxBytes': 1024 * 1024 * 5,
-            'backupCount': 5,
         },
 		'sentry': {
             'level': 'WARNING',
@@ -217,7 +207,7 @@ Q_CLUSTER = {
     'name': 'itassets',
     'workers': 4,
     'recycle': 500,
-    'timeout': 3600,
+    'timeout': 7200,
     'compress': True,
     'save_limit': 250,
     'queue_limit': 500,

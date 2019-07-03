@@ -124,10 +124,20 @@ class ITSystemAdmin(VersionAdmin):
                 'biller_code',
             )
         }),
+        ('Retention and disposal', {
+            'fields': (
+                'defunct_date',
+                'retention_reference_no',
+                'disposal_action',
+                'custody',
+                'retention_comments',
+            )
+        }),
     )
     # Override the default reversion/change_list.html template:
     change_list_template = 'admin/registers/itsystem/change_list.html'
     form = ITSystemForm  # Use the custom ModelForm.
+    save_on_top = True
 
     def get_urls(self):
         urls = super(ITSystemAdmin, self).get_urls()
@@ -140,7 +150,7 @@ class ITSystemAdmin(VersionAdmin):
 
 @register(ITSystemDependency)
 class ITSystemDependencyAdmin(VersionAdmin):
-    list_display = ('itsystem', 'dependency', 'criticality')
+    list_display = ('itsystem', 'itsystem_status', 'dependency', 'criticality')
     list_filter = ('criticality',)
     search_fields = ('itsystem__name', 'dependency__name', 'description')
     # Override the default reversion/change_list.html template:
@@ -166,6 +176,10 @@ class ITSystemDependencyAdmin(VersionAdmin):
             ),
         ]
         return extra_urls + urls
+
+    def itsystem_status(self, obj):
+        return obj.itsystem.get_status_display()
+    itsystem_status.short_description = 'IT system status'
 
     def itsystem_dependency_reports(self, request):
         context = {'title': 'IT System dependency reports'}
@@ -346,7 +360,7 @@ def email_endorser(modeladmin, request, queryset):
     """
     for rfc in queryset:
         if rfc.is_submitted:
-            rfc.email_endorser(request)
+            rfc.email_endorser()
             msg = 'Request for approval emailed to {}.'.format(rfc.endorser.get_full_name())
             log = ChangeLog(change_request=rfc, log=msg)
             log.save()
@@ -360,7 +374,7 @@ def email_implementer(modeladmin, request, queryset):
     """
     for rfc in queryset:
         if rfc.status == 3 and rfc.planned_end <= datetime.now().astimezone(timezone(settings.TIME_ZONE)) and rfc.completed is None:
-            rfc.email_implementer(request)
+            rfc.email_implementer()
             msg = 'Request for completion record-keeping emailed to {}.'.format(rfc.implementer.get_full_name())
             log = ChangeLog(change_request=rfc, log=msg)
             log.save()

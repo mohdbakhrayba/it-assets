@@ -32,7 +32,6 @@ class DepartmentUserSerializer(serializers.ModelSerializer):
     location = UserLocationSerializer()
     org_unit = UserOrgUnitSerializer()
     group_unit = UserOrgUnitSerializer()
-    #children = serializers.ListField(source='children_filtered')
 
     class Meta:
         model = DepartmentUser
@@ -46,7 +45,6 @@ class DepartmentUserSerializer(serializers.ModelSerializer):
             'org_unit_chain',
             'parent',
             'children',
-            'employee_id',
         )
 
 
@@ -103,10 +101,10 @@ class OrgUnitViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class OrgTreeSerializer(serializers.ModelSerializer):
-    children = serializers.ListField(source='children.all', child=RecursiveField())
+    children = serializers.ListField(source='children_active', child=RecursiveField())
     class Meta:
         model = OrgUnit
-        fields = ('id', 'name', 'children')
+        fields = ('id', 'name', 'acronym', 'children')
 
 
 class OrgTreeViewSet(viewsets.ReadOnlyModelViewSet):

@@ -107,7 +107,11 @@ class DepartmentUser(MPTTModel):
         related_name='children', editable=True, verbose_name='Reports to',
         help_text='Person that this employee reports to')
     expiry_date = models.DateTimeField(
-        null=True, blank=True, help_text='Date that the AD account is set to expire.')
+        null=True, blank=True, help_text='Date that the AD account will expire.')
+    date_hr_term = models.DateTimeField(
+        null=True, blank=True, editable=False, verbose_name='HR termination date', help_text='Date on file with HR as the job termination date.')
+    hr_auto_expiry = models.BooleanField(
+        default=False, verbose_name='HR auto expiry', help_text='When the HR termination date changes, automatically update the expiry date to match.')
     date_ad_updated = models.DateTimeField(
         null=True, editable=False, verbose_name='Date AD updated',
         help_text='The date when the AD account was last updated.')
@@ -330,19 +334,19 @@ class DepartmentUser(MPTTModel):
     def group_unit(self):
         """Return the group-level org unit, as seen in the primary address book view.
         """
-        for org in self.org_unit.get_ancestors(ascending=True, include_self=True):
-            if org.unit_type in (0, 1):
-                return org
+        if self.org_unit is not None:
+            for org in self.org_unit.get_ancestors(ascending=True):
+                if org.unit_type in (0, 1):
+                    return org
         return self.org_unit
 
     def get_gal_department(self):
         """Return a string to place into the "Department" field for the Global Address List.
         """
         s = ''
-        if self.org_data and 'units' in self.org_data and len(self.org_data['units']) > 0:
-            s = self.org_data['units'][0]['acronym']
-            if len(self.org_data['units']) > 1:
-                s += ' - {}'.format(self.org_data['units'][1]['name'])
+        unit = self.group_unit
+        if unit:
+            s = '{}'.format(unit.name)
         return s
 
     def get_full_name(self):
@@ -454,6 +458,9 @@ class OrgUnit(MPTTModel):
         if not getattr(self, 'cheap_save', False):
             for user in self.members():
                 user.save()
+
+    def children_active(self):
+        return self.children.filter(active=True)
 
     def get_descendants_active(self, *args, **kwargs):
         """Exclude 'inactive' OrgUnit objects from get_descendants() queryset.

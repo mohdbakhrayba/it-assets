@@ -1,64 +1,13 @@
-import datetime
+from datetime import date, datetime, timedelta
 from django.conf import settings
 import logging
-from openpyxl import load_workbook
+from collections import OrderedDict
 import psycopg2
 import pytz
+import titlecase
 
-
-PERTH = pytz.timezone('Australia/Perth')
+TZ = pytz.timezone(settings.TIME_ZONE)
 LOGGER = logging.getLogger('sync_tasks')
-
-
-def alesco_data_import(fileobj):
-    """Import task expects to be passed a file object (an uploaded .xlsx).
-    """
-    from .models import DepartmentUser
-    LOGGER.info('Alesco data for DepartmentUsers is being updated')
-    wb = load_workbook(fileobj, read_only=True)
-    ws = wb.worksheets[0]
-    keys = []
-    values = []
-    non_matched = 0
-    multi_matched = 0
-    updates = 0
-    # Iterate over each row in the worksheet.
-    for k, row in enumerate(ws.iter_rows()):
-        values = []
-        for cell in row:
-            # First row: generate keys.
-            if k == 0:
-                keys.append(cell.value)
-            # Otherwise make a list of values.
-            else:
-                # Serialise datetime objects.
-                if isinstance(cell.value, datetime.datetime):
-                    values.append(cell.value.isoformat())
-                else:
-                    values.append(cell.value)
-        if k > 0:
-            # Construct a dictionary of row values.
-            record = dict(zip(keys, values))
-            # Try to find a matching DepartmentUser by employee id.
-            d = DepartmentUser.objects.filter(employee_id=record['EMPLOYEE_NO'])
-            if d.count() > 1:
-                multi_matched += 1
-            elif d.count() == 1:
-                d = d[0]
-                d.alesco_data = record
-                d.save()
-                updates += 1
-            else:
-                non_matched += 0
-    if updates > 0:
-        LOGGER.info('Alesco data for {} DepartmentUsers was updated'.format(updates))
-    if non_matched > 0:
-        LOGGER.warning('Employee ID was not matched for {} rows'.format(non_matched))
-    if multi_matched > 0:
-        LOGGER.error('Employee ID was matched for >1 DepartmentUsers for {} rows'.format(multi_matched))
-    return True
-
-
 ALESCO_DB_FIELDS = (
     'employee_id', 'surname', 'initials', 'first_name', 'second_name', 'gender',
     'date_of_birth', 'occup_type', 'current_commence', 'job_term_date',
@@ -67,7 +16,161 @@ ALESCO_DB_FIELDS = (
     'classification', 'step_id', 'emp_status', 'emp_stat_desc',
     'location', 'location_desc', 'paypoint', 'paypoint_desc', 'manager_emp_no',
 )
-ALESCO_DATE_MAX = datetime.date(2049, 12, 31)
+ALESCO_DATE_MAX = date(2049, 12, 31)
+
+
+def alesco_scrub_title(title):
+    # remove extra spaces
+    title_raw = ' '.join(title.upper().split())
+
+    # ranger job titles have too much junk attached, jettison!
+    if title_raw.startswith('RANGER'):
+        return 'Ranger'
+    if title_raw.startswith('SENIOR RANGER'):
+        return 'Senior Ranger'
+
+    def replace(word, **kwargs):
+        result = None
+        prefix = ''
+        suffix = ''
+        if word.startswith('('):
+            prefix = '('
+            word = word[1:]
+        if word.endswith(')'):
+            suffix = ')'
+            word = word[:-1]
+        if word.upper() in ('RIA', 'DBCA', 'BGPA', 'ZPA', 'PVS', 'IT', 'ICT', 'AV', 'HR', 'GIS', 'FMDP', 'SFM', 'OIM', 'HAAMC', 'TEC', 'MATES', 'AWU', 'FOI', 'KABC', 'VOG', 'WSS', 'EDRMS', 'LUP', 'WA', 'KSCS', 'OT'):
+            result = word.upper()
+        else:
+            expand = {
+                '&': 'and',
+                'BG': 'Botanic Garden',
+                'DEPT': 'Department',
+                'CON': 'Conservation',
+                'CONS': 'Conservation',
+                'CONSER': 'Conservation',
+                'CONSERV': 'Conservation',
+                'COORD': 'Coordinator',
+                'CO-ORDINATOR': 'Coordinator',
+                'COORDIN': 'Coordinator',
+                'CUST': 'Customer',
+                'MGMT': 'Management',
+                'IS': 'Island',
+                'NP': 'National Park',
+                'OCC': 'Occupational',
+                'SAF': 'Safety',
+                'SRV': 'Service',
+                'SNR': 'Senior',
+                'SERVIC': 'Services',
+                'SCIENT': 'Scientist',
+                'SCIENT.': 'Scientist',
+                'ODG': 'Office of the Director General',
+                'CHAIRPERSON,': 'Chairperson -',
+                'OFFICER,': 'Officer -',
+                'DIRECTOR,': 'Director -',
+                'LEADER,': 'Leader -',
+                'MANAGER,': 'Manager -',
+                'COORDINATOR,': 'Coordinator -',
+            }
+            if word.upper() in expand:
+                result = expand[word.upper()]
+        if result:
+            return prefix + result + suffix
+
+    title_fixed = titlecase.titlecase(title_raw, callback=replace)
+    return title_fixed
+
+
+def alesco_date_to_dt(dt, hour=0, minute=0, second=0):
+    """Take in a date object and return it as a timezone-aware datetime.
+    """
+    d = TZ.localize(datetime(dt.year, dt.month, dt.day, 0, 0))
+    return d + timedelta(hours=hour, minutes=minute, seconds=second)
+
+
+def update_manager_from_alesco(user):
+    from .models import DepartmentUser
+    manager = None
+
+    if user.alesco_data:
+        managers = [x['manager_emp_no'] for x in user.alesco_data if x['manager_emp_no']]
+        managers = OrderedDict.fromkeys(managers).keys()
+        managers = [DepartmentUser.objects.filter(employee_id=x).first() for x in managers]
+        managers = [x for x in managers if x and (user.pk != x.pk)]
+        if managers:
+            manager = managers[0]
+
+    if manager:
+        if manager != user.parent:
+            if manager in user.get_descendants():
+                LOGGER.info('Removing manager relationship from {}, should be fixed next cycle'.format(manager.email))
+                manager.parent = None
+                manager.save()
+
+            LOGGER.info('Updating manager for {} from {} to {}'.format(user.email, user.parent.email if user.parent else None, manager.email if manager else None))
+            user.parent = manager
+            user.save()
+
+
+def update_term_date_from_alesco(user):
+    from .models import DepartmentUser
+    today = alesco_date_to_dt(date.today())
+    term_date = None
+
+    if user.alesco_data:
+        term_dates = [date.fromisoformat(x['job_term_date']) for x in user.alesco_data if x['job_term_date']]
+        if term_dates:
+            term_date = max(term_dates)
+            term_date = alesco_date_to_dt(term_date) if term_date and term_date != ALESCO_DATE_MAX else None
+
+    if term_date:
+        stored_term_date = TZ.normalize(user.date_hr_term) if user.date_hr_term else None
+        if term_date != stored_term_date:
+
+            if user.hr_auto_expiry:
+                LOGGER.info('Updating expiry for {} from {} to {}'.format(user.email, stored_term_date, term_date))
+                user.expiry_date = term_date
+            user.date_hr_term = term_date
+            user.save()
+
+
+def update_title_from_alesco(user):
+    from .models import DepartmentUser
+    title = None
+
+    if user.alesco_data:
+        title = next((x['occup_pos_title'] for x in user.alesco_data if 'occup_pos_title' in x and x['occup_pos_title']), None)
+        if title:
+            title = alesco_scrub_title(title)
+
+    if title:
+        if title != user.title:
+            LOGGER.info('Updating title for {} from {} to {}'.format(user.email, user.title, title))
+            user.title = title
+            user.save()
+
+
+def update_location_from_alesco(user):
+    from .models import DepartmentUser, Location
+    location = None
+
+    if user.alesco_data:
+        location = next((x['location'] for x in user.alesco_data if 'location' in x and x['location']), None)
+        location = Location.objects.filter(ascender_code=location).first()
+
+    if location:
+        if location != user.location:
+            LOGGER.info('Updating location for {} from {} to {}'.format(user.email, user.location, location))
+            user.location = location
+            user.save()
+
+
+
+def update_user_from_alesco(user):
+    update_manager_from_alesco(user)
+    update_term_date_from_alesco(user)
+    update_title_from_alesco(user)
+    update_location_from_alesco(user)
 
 
 def alesco_db_fetch():
@@ -90,17 +193,19 @@ def alesco_db_fetch():
         yield row
 
 
-def alesco_db_import():
+def alesco_db_import(update_dept_user=False):
+    """A task to update DepartmentUser field values from Alesco database information.
+    By default, it saves Alesco data in the alesco_data JSON field.
+    If update_dept_user == True, the function will also update several other field values.
+    """
     from .models import DepartmentUser
 
     date_fields = ['date_of_birth', 'current_commence', 'job_term_date', 'occup_commence_date', 'occup_term_date']
-
     status_ranking = [
         'PFAS', 'PFA', 'PFT', 'CFA', 'CFT', 'NPAYF',
         'PPA', 'PPT', 'CPA', 'CPT', 'NPAYP',
         'CCFA', 'CAS', 'SEAS', 'TRAIN', 'NOPAY', 'NON',
     ]
-
     classification_ranking = [
         'CEO', 'CL3', 'CL2', 'CL1',
         'L9', 'L8', 'L7',
@@ -111,13 +216,12 @@ def alesco_db_import():
         'SCL2', 'R2', 'L2',
         'SCL1', 'R1', 'L12', 'L1',
     ]
-
-    date_to_dt = lambda d: PERTH.localize(datetime.datetime(d.year, d.month, d.day, 0, 0)) + datetime.timedelta(days=1)
     records = {}
     alesco_iter = alesco_db_fetch()
+    today = date.today()
 
+    LOGGER.info('Querying Alesco database for employee information')
     for row in alesco_iter:
-
         record = dict(zip(ALESCO_DB_FIELDS, row))
         eid = record['employee_id']
 
@@ -125,32 +229,34 @@ def alesco_db_import():
             records[eid] = []
         records[eid].append(record)
 
-    users = []
-
+    LOGGER.info('Updating local DepartmentUser information from Alesco data')
     for key, record in records.items():
+        if not DepartmentUser.objects.filter(employee_id=key).exists():
+            continue
+
+        # Perform some sorting to place the employee's Alesco record(s) in order from
+        # most applicable to least applicable.
         record.sort(key=lambda x: classification_ranking.index(x['classification']) if x['classification'] in classification_ranking else 100)
         record.sort(key=lambda x: status_ranking.index(x['emp_status']) if x['emp_status'] in status_ranking else 100)
-        record.sort(key=lambda x: x['job_term_date'], reverse=True)
-        term_date = record[0]['job_term_date']
-        term_date = date_to_dt(term_date) if term_date != ALESCO_DATE_MAX else None
+        # start off by current jobs sorted by rank, follow up by chronological list of expired jobs
+        current = [x for x in record if x['job_term_date'] is None or x['job_term_date'] >= today]
+        expired = [x for x in record if x['job_term_date'] and x['job_term_date'] < today]
+        expired.sort(key=lambda x: x['job_term_date'], reverse=True)
+        record = current + expired
 
         for rec in record:
             for field in date_fields:
                 rec[field] = rec[field].isoformat() if rec[field] and rec[field] != ALESCO_DATE_MAX else None
 
-        user = DepartmentUser.objects.filter(employee_id=key).first()
-
-        if not user:
-            continue
+        user = DepartmentUser.objects.get(employee_id=key)
+#        order = lambda obj: tuple([x['position_id'] for x in obj])
+#        if order(user.alesco_data) != order(record):
+#            print('Changing {}'.format(user.email))
+#            print([(x['classification'], x['emp_stat_desc'], x['occup_pos_title'], x['job_term_date']) for x in user.alesco_data])
+#            print([(x['classification'], x['emp_stat_desc'], x['occup_pos_title'], x['job_term_date']) for x in record])
 
         user.alesco_data = record
-
-        if term_date:
-            expiry_date = PERTH.normalize(user.expiry_date) if user.expiry_date else None
-            if term_date != expiry_date:
-                print('Updating expiry for {} from {} to {}'.format(user.email, expiry_date, term_date))
-
         user.save()
-        users.append(user)
 
-    return users
+        if update_dept_user:
+            update_user_from_alesco(user)
